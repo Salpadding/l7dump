@@ -21,7 +21,9 @@ var (
 type HttpTracker struct {
 	conns sync.Map
 
+    // PreReq 决定这个http请求是否会被追踪
 	PreReq  func(*http.Request) bool
+    // 被追踪的请求会被调用 PostReq
 	PostReq func(req *http.Request, resp *http.Response)
 }
 
