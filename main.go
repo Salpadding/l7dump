@@ -120,7 +120,7 @@ func main() {
 
 	httpTracker := HttpTracker{
 		PreReq: func(r *http.Request) bool {
-            fmt.Printf("%s\n", r.URL.String())
+			fmt.Printf("%s\n", r.URL.String())
 			return strings.Contains(r.URL.String(), matchUrl)
 		},
 		PostReq: func(req *http.Request, resp *http.Response, reqBody, respBody []byte) {
