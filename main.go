@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -22,7 +22,7 @@ type HttpTracker struct {
 	conns sync.Map
 
 	PreReq  func(*http.Request) bool
-	PostReq func(req *http.Request, resp *http.Response, reqBody, respBody []byte)
+	PostReq func(req *http.Request, resp *http.Response)
 }
 
 func (h *HttpTracker) GetConnect(meta ConnMeta) ProtocolConnTracker {
@@ -65,9 +65,7 @@ type HttpConnTracker struct {
 	LastReq  *http.Request
 	LastResp *http.Response
 
-	Record   bool
-	ReqBody  []byte
-	RespBody []byte
+	Record bool
 }
 
 func (h *HttpConnTracker) OnRequest(req interface{}) error {
@@ -83,8 +81,6 @@ func (h *HttpConnTracker) OnRequest(req interface{}) error {
 		return nil
 	}
 
-	h.ReqBody, _ = ioutil.ReadAll(r.Body)
-	r.Body.Close()
 	return nil
 }
 
@@ -99,8 +95,7 @@ func (h *HttpConnTracker) OnResponse(resp interface{}) error {
 		r.Body.Close()
 		return nil
 	}
-	h.RespBody, _ = ioutil.ReadAll(r.Body)
-	h.Tracker.PostReq(h.LastReq, h.LastResp, h.ReqBody, h.RespBody)
+	h.Tracker.PostReq(h.LastReq, h.LastResp)
 	return nil
 }
 
@@ -124,11 +119,11 @@ func main() {
 		PreReq: func(r *http.Request) bool {
 			return strings.Contains(r.URL.String(), os.Args[3])
 		},
-		PostReq: func(req *http.Request, resp *http.Response, reqBody, respBody []byte) {
+		PostReq: func(req *http.Request, resp *http.Response) {
 			fmt.Printf("%s %s\n", req.Method, req.URL.String())
-			fmt.Print(string(reqBody))
+			io.Copy(os.Stdout, req.Body)
 			fmt.Println()
-			fmt.Print(string(respBody))
+			io.Copy(os.Stdout, resp.Body)
 			fmt.Println()
 		},
 	}
