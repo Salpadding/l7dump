@@ -2,148 +2,136 @@ package main
 
 import (
 	"bufio"
-	"encoding/binary"
 	"fmt"
-	"io"
-	"log"
-	"net"
+	"io/ioutil"
 	"net/http"
-	"time"
+	"strings"
+	"sync"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
-	"github.com/google/gopacket/tcpassembly"
 	"github.com/google/gopacket/tcpassembly/tcpreader"
 )
 
-const (
-	expr = "tcp and dst port 80"
-)
-
 var (
-	// Endpoint 在 layers 中定义
-	ipv4                    = layers.EndpointIPv4
-	_    tcpassembly.Stream = (*httpDecoder)(nil)
+	_ ProtocolTracker     = (*HttpTracker)(nil)
+	_ ProtocolConnTracker = (*HttpConnTracker)(nil)
 )
 
-// httpDecoder 针对 http 协议进行解包
-// assembler 作了封装处理
-// 我们只需要负责解包 不需要关心 ip 层的分片 tcp 连接的状态等
-type httpDecoder struct {
-	// net 中记录了网络层的元数据 (源ip 目标ip 等)
-	// transport 记录了传输层的元数据 (源端口 目标端口等)
-	net, transport gopacket.Flow
+type HttpTracker struct {
+	conns sync.Map
 
-	// tcp 数据流会被丢到这里面 我们从这里面读取就行了
-	stream tcpreader.ReaderStream
+	PreReq  func(*http.Request) bool
+	PostReq func(req *http.Request, resp *http.Response, reqBody, respBody []byte)
 }
 
-// Ip 获取源ip 目标 ip
-func (h *httpDecoder) Ip() (net.IP, net.IP) {
-	if h.net.EndpointType() != ipv4 {
-		return net.IPv4zero, net.IPv4zero
-	}
-	return (net.IP)(h.net.Src().Raw()), (net.IP)(h.net.Dst().Raw())
-
+func (h *HttpTracker) GetConnect(meta ConnMeta) ProtocolConnTracker {
+	actual, _ := h.conns.LoadOrStore(meta.String(), &HttpConnTracker{
+		ConnMeta: meta,
+		Tracker:  h,
+	})
+	return actual.(ProtocolConnTracker)
 }
 
-// Port 获取源端口 目标端口
-func (h *httpDecoder) Port() (int, int) {
-	return int(binary.BigEndian.Uint16(h.transport.Src().Raw())), int(binary.BigEndian.Uint16(h.transport.Dst().Raw()))
+func (h *HttpTracker) OnClose(conn ProtocolConnTracker) {
+	h.conns.Delete((conn.(*HttpConnTracker)).ConnMeta.String())
 }
 
-// Reassembled 代理模式
-func (h *httpDecoder) Reassembled(data []tcpassembly.Reassembly) {
-	h.stream.Reassembled(data)
+func (h *HttpTracker) ServerPort() int {
+	return 80
 }
 
-// ReassemblyComplete 代理模式
-func (h *httpDecoder) ReassemblyComplete() {
-	h.stream.ReassemblyComplete()
-}
-
-func (h *httpDecoder) run() {
-	// 加缓冲 减少阻塞
-	buf := bufio.NewReader(&h.stream)
-
-	for {
-		// 把 tcp 数据流转成 http 报文
+func (h *HttpTracker) RequestDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error) {
+	buf := bufio.NewReader(stream)
+	return func() (interface{}, error) {
 		req, err := http.ReadRequest(buf)
-		// 连接断开了
-		if err == io.EOF {
-			return
-		}
-
-		if err != nil {
-			continue
-		}
-
-		fmt.Printf("%s\n", req.Host)
-
-		// 很多时候不需要解析 body
-		// 例如 body 不是文本
-		// 丢弃 不然会阻塞
-		tcpreader.DiscardBytesToEOF(req.Body)
-		req.Body.Close()
+		(conn.(*HttpConnTracker)).LastReq = req
+		return req, err
 	}
 }
 
-type httpDecoderFactory struct{}
+func (h *HttpTracker) ResponseDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error) {
+	buf := bufio.NewReader(stream)
+	return func() (val interface{}, err error) {
+		defer func() {
+			if err != nil {
+			}
+		}()
+		req := (conn.(*HttpConnTracker)).LastReq
+		conn.(*HttpConnTracker).LastResp, err = http.ReadResponse(buf, req)
+		return conn.(*HttpConnTracker).LastResp, err
+	}
+}
 
-func (h *httpDecoderFactory) New(net, transport gopacket.Flow) tcpassembly.Stream {
-	hstream := &httpDecoder{
-		net:       net,
-		transport: transport,
-		stream:    tcpreader.NewReaderStream(),
+type HttpConnTracker struct {
+	Tracker  *HttpTracker
+	ConnMeta ConnMeta
+	LastReq  *http.Request
+	LastResp *http.Response
+
+	Record   bool
+	ReqBody  []byte
+	RespBody []byte
+}
+
+func (h *HttpConnTracker) OnRequest(req interface{}) error {
+	if req == nil {
+		return nil
+	}
+	r := req.(*http.Request)
+
+	h.Record = h.Tracker.PreReq(r)
+	if !h.Record {
+		tcpreader.DiscardBytesToEOF(r.Body)
+		r.Body.Close()
+		return nil
 	}
 
-	srcIp, dstIp := hstream.Ip()
-	srcPort, dstPort := hstream.Port()
-	log.Printf("new tcp conn %s:%d -> %s:%d\n", srcIp, srcPort, dstIp, dstPort)
-	go hstream.run() // Important... we must guarantee that data from the reader stream is read.
-
-	// ReaderStream implements tcpassembly.Stream, so we can return a pointer to it.
-	return &hstream.stream
+	h.ReqBody, _ = ioutil.ReadAll(r.Body)
+	r.Body.Close()
+	return nil
 }
+
+func (h *HttpConnTracker) OnResponse(resp interface{}) error {
+	if resp == nil {
+		return nil
+	}
+	r := resp.(*http.Response)
+
+	if !h.Record {
+		tcpreader.DiscardBytesToEOF(r.Body)
+		r.Body.Close()
+		return nil
+	}
+	h.RespBody, _ = ioutil.ReadAll(r.Body)
+	h.Tracker.PostReq(h.LastReq, h.LastResp, h.ReqBody, h.RespBody)
+	return nil
+}
+
+func (h *HttpConnTracker) OnError(err error) {
+}
+
+// 示例程序
+// 打印所有 url 中包含 /kapis/resources.kubesphere.io/v1alpha2/componenthealth 的请求
+const matchUrl = "/kapis/resources.kubesphere.io/v1alpha2/components"
 
 func main() {
-	// 以太网 MTU 通常小于 1600
-	handle, err := pcap.OpenLive("en0", 1600, true, pcap.BlockForever)
-	if err != nil {
-		panic(err)
+	mgr := ProtocolSessionMgr{
+		trackers: make(map[int]ProtocolTracker),
 	}
 
-	// http 协议通常是 80 端口
-	if err = handle.SetBPFFilter(expr); err != nil {
-		panic(err)
+	httpTracker := HttpTracker{
+		PreReq: func(r *http.Request) bool {
+            fmt.Printf("%s\n", r.URL.String())
+			return strings.Contains(r.URL.String(), matchUrl)
+		},
+		PostReq: func(req *http.Request, resp *http.Response, reqBody, respBody []byte) {
+			fmt.Printf("%s %s\n", req.Method, req.URL.String())
+			fmt.Print(string(reqBody))
+			fmt.Println()
+			fmt.Print(string(respBody))
+		},
 	}
-
-	var factory httpDecoderFactory
-	// 源数据队列
-	ps := gopacket.NewPacketSource(handle, handle.LinkType())
-
-	// assembler 具有处理 ip 分片, tcp 分包的能力
-	pool := tcpassembly.NewStreamPool(&factory)
-	assembler := tcpassembly.NewAssembler(pool)
-	ticker := time.Tick(time.Minute)
-	packets := ps.Packets()
-
-	for {
-		select {
-		case packet := <-packets:
-			if packet == nil {
-				return
-			}
-			if packet.NetworkLayer() == nil || packet.TransportLayer() == nil ||
-				packet.TransportLayer().LayerType() != layers.LayerTypeTCP {
-				continue
-			}
-
-			tcp := packet.TransportLayer().(*layers.TCP)
-			assembler.AssembleWithTimestamp(packet.NetworkLayer().NetworkFlow(), tcp, packet.Metadata().Timestamp)
-		case <-ticker:
-			assembler.FlushOlderThan(time.Now().Add(time.Minute * -2))
-		}
+	mgr.trackers[80] = &httpTracker
+	if err := mgr.Listen("en0"); err != nil {
+		panic(err)
 	}
 }
