@@ -22,6 +22,7 @@ type ProtocolConnTracker interface {
 
 // ProtocolTracker 追踪 C/S 架构的 TCP 连接
 // 通常在服务端运行 以便于追踪所有客户端请求
+// 主要作用是管理连接池 解码
 type ProtocolTracker interface {
 	ServerPort() int
 	RequestDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error)
@@ -124,6 +125,8 @@ func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (Conn
 
 }
 
+// Listen 
+// TODO: 复用 bpf 表达式
 func (s *ProtocolSessionMgr) Listen(iface string) error {
 	// 以太网 MTU 通常小于 1600
 	handle, err := pcap.OpenLive("en0", 1600, true, pcap.BlockForever)

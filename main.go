@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -113,15 +115,18 @@ func (h *HttpConnTracker) OnError(err error) {
 // 打印所有 url 中包含 /kapis/resources.kubesphere.io/v1alpha2/componenthealth 的请求
 const matchUrl = "/kapis/resources.kubesphere.io/v1alpha2/components"
 
+// l7dump en0 80 /order 
 func main() {
+    if len(os.Args) < 4 {
+        panic("usage: l7dump [port] [path]")
+    }
 	mgr := ProtocolSessionMgr{
 		trackers: make(map[int]ProtocolTracker),
 	}
 
 	httpTracker := HttpTracker{
 		PreReq: func(r *http.Request) bool {
-			fmt.Printf("%s\n", r.URL.String())
-			return strings.Contains(r.URL.String(), matchUrl)
+			return strings.Contains(r.URL.String(), os.Args[3])
 		},
 		PostReq: func(req *http.Request, resp *http.Response, reqBody, respBody []byte) {
 			fmt.Printf("%s %s\n", req.Method, req.URL.String())
@@ -130,8 +135,10 @@ func main() {
 			fmt.Print(string(respBody))
 		},
 	}
-	mgr.trackers[80] = &httpTracker
-	if err := mgr.Listen("en0"); err != nil {
+
+    port, _ := strconv.Atoi(os.Args[2])
+	mgr.trackers[port] = &httpTracker
+	if err := mgr.Listen(os.Args[1]); err != nil {
 		panic(err)
 	}
 }
