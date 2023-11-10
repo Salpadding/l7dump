@@ -24,7 +24,6 @@ type ProtocolConnTracker interface {
 // 通常在服务端运行 以便于追踪所有客户端请求
 // 主要作用是管理连接池 解码
 type ProtocolTracker interface {
-	ServerPort() int
 	RequestDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error)
 	ResponseDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error)
 
@@ -125,11 +124,16 @@ func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (Conn
 
 }
 
-// Listen 
+// Listen
 // TODO: 复用 bpf 表达式
 func (s *ProtocolSessionMgr) Listen(iface string) error {
+	var port int
+	for p := range s.trackers {
+		port = p
+	}
+
 	// 以太网 MTU 通常小于 1600
-	handle, err := pcap.OpenLive("en0", 1600, true, pcap.BlockForever)
+	handle, err := pcap.OpenLive(iface, 1600, true, pcap.BlockForever)
 
 	if err != nil {
 		return err
@@ -137,7 +141,7 @@ func (s *ProtocolSessionMgr) Listen(iface string) error {
 
 	// TODO: 多端口复用同一个 bpffilter
 	// 只保留 ip.protocol = tcp 的 而且 tcp.port = serverPort 的 包
-	if err = handle.SetBPFFilter(fmt.Sprintf("tcp and port %d", 80)); err != nil {
+	if err = handle.SetBPFFilter(fmt.Sprintf("tcp and port %d", port)); err != nil {
 		panic(err)
 	}
 
