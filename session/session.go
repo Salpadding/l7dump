@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"encoding/binary"
@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/Salpadding/l7dump/tracker"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -14,31 +15,13 @@ import (
 	"github.com/google/gopacket/tcpassembly/tcpreader"
 )
 
-type ProtocolConnTracker interface {
-	OnRequest(req interface{}) error
-	OnResponse(resp interface{}) error
-	OnError(error)
-}
-
-// ProtocolTracker 追踪 C/S 架构的 TCP 连接
-// 通常在服务端运行 以便于追踪所有客户端请求
-// 主要作用是管理连接池 解码
-type ProtocolTracker interface {
-	RequestDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error)
-	ResponseDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error)
-
-	GetConnect(ConnMeta) ProtocolConnTracker
-
-	OnClose(ProtocolConnTracker)
-}
-
 type ProtocolSessionMgr struct {
-	trackers map[int]ProtocolTracker
+	Trackers map[int]tracker.ProtocolTracker
 }
 
 type protocolConnTrackerWrapper struct {
-	conn      ProtocolConnTracker
-	tracker   ProtocolTracker
+	conn      tracker.ProtocolConnTracker
+	tracker   tracker.ProtocolTracker
 	decoder   func() (interface{}, error)
 	handler   func(interface{}) error
 	errHandle func(error)
@@ -62,7 +45,7 @@ func (s *protocolConnTrackerWrapper) run() {
 
 func (s *ProtocolSessionMgr) newWrapper(net, transport gopacket.Flow) protocolConnTrackerWrapper {
 	meta, isReq := s.connKey(net, transport)
-	tracker := s.trackers[meta.ServerPort]
+	tracker := s.Trackers[meta.ServerPort]
 	conn := tracker.GetConnect(meta)
 	wrapper := protocolConnTrackerWrapper{
 		tracker:   tracker,
@@ -88,34 +71,23 @@ func (s *ProtocolSessionMgr) New(net, transport gopacket.Flow) tcpassembly.Strea
 	return &wrapper.stream
 }
 
-type ConnMeta struct {
-	ClientIP   net.IP
-	ServerIP   net.IP
-	ClientPort int
-	ServerPort int
-}
-
-func (c *ConnMeta) String() string {
-	return fmt.Sprintf("%s:%d %s:%d", c.ClientIP.String(), c.ClientPort, c.ServerIP.String(), c.ServerPort)
-}
-
 // connKey 客户端的端口一定大于服务端的端口
 // pcap 里面客户端到服务端 服务端到客户端 会触发两次 ServerSessionMgr.New
 // 我们通过这个 key 判断是否是新的连接
-func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (ConnMeta, bool) {
+func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (tracker.ConnMeta, bool) {
 	ip1 := (net.IP)(netFlow.Src().Raw())
 	ip2 := (net.IP)(netFlow.Dst().Raw())
 	port1 := int(binary.BigEndian.Uint16(transportFlow.Src().Raw()))
 	port2 := int(binary.BigEndian.Uint16(transportFlow.Dst().Raw()))
 	if port1 > port2 {
-		return ConnMeta{
+		return tracker.ConnMeta{
 			ClientIP:   ip1,
 			ClientPort: port1,
 			ServerIP:   ip2,
 			ServerPort: port2,
 		}, true
 	}
-	return ConnMeta{
+	return tracker.ConnMeta{
 		ClientIP:   ip2,
 		ClientPort: port2,
 		ServerIP:   ip1,
@@ -128,7 +100,7 @@ func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (Conn
 // TODO: 复用 bpf 表达式
 func (s *ProtocolSessionMgr) Listen(iface string) error {
 	var port int
-	for p := range s.trackers {
+	for p := range s.Trackers {
 		port = p
 	}
 
