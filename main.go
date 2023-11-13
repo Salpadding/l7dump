@@ -10,7 +10,6 @@ import (
 
 	httpTracker "github.com/Salpadding/l7dump/http"
 	"github.com/Salpadding/l7dump/session"
-	"github.com/Salpadding/l7dump/tracker"
 )
 
 // 示例程序
@@ -22,11 +21,9 @@ func main() {
 	if len(os.Args) < 4 {
 		panic("usage: l7dump [iface] [port] [path]")
 	}
-	mgr := session.ProtocolSessionMgr{
-		Trackers: make(map[int]tracker.ProtocolTracker),
-	}
+	mgr := session.NewMgr()
 
-	httpTracker := httpTracker.HttpTracker{
+	httpTracker := httpTracker.Tracker{
 		PreReq: func(r *http.Request) bool {
 			return strings.Contains(r.URL.String(), os.Args[3])
 		},
@@ -41,8 +38,8 @@ func main() {
 
 	port, _ := strconv.Atoi(os.Args[2])
 
-	fmt.Printf("add http tracker at port %d", port)
-	mgr.Trackers[port] = &httpTracker
+	mgr.AddTracker(port, &httpTracker)
+	fmt.Printf("add http core at port %d", port)
 	if err := mgr.Listen(os.Args[1]); err != nil {
 		panic(err)
 	}

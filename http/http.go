@@ -3,19 +3,17 @@ package http
 import (
 	"bufio"
 	"net/http"
-	"sync"
 
-	"github.com/Salpadding/l7dump/tracker"
+	"github.com/Salpadding/l7dump/core"
 	"github.com/google/gopacket/tcpassembly/tcpreader"
 )
 
 var (
-	_ tracker.ProtocolTracker     = (*HttpTracker)(nil)
-	_ tracker.ProtocolConnTracker = (*HttpConnTracker)(nil)
+	_ core.ProtocolTracker     = (*Tracker)(nil)
+	_ core.ProtocolConnTracker = (*ConnTracker)(nil)
 )
 
-type HttpTracker struct {
-	conns sync.Map
+type Tracker struct {
 
 	// PreReq 决定这个http请求是否会被追踪
 	PreReq func(*http.Request) bool
@@ -23,50 +21,48 @@ type HttpTracker struct {
 	PostReq func(req *http.Request, resp *http.Response)
 }
 
-func (h *HttpTracker) GetConnect(meta tracker.ConnMeta) tracker.ProtocolConnTracker {
-	actual, _ := h.conns.LoadOrStore(meta.String(), &HttpConnTracker{
+func (h *Tracker) NewConnect(meta core.ConnMeta) core.ProtocolConnTracker {
+	return &ConnTracker{
 		ConnMeta: meta,
 		Tracker:  h,
-	})
-	return actual.(tracker.ProtocolConnTracker)
+	}
 }
 
-func (h *HttpTracker) OnClose(conn tracker.ProtocolConnTracker) {
-	h.conns.Delete((conn.(*HttpConnTracker)).ConnMeta.String())
+func (h *Tracker) OnClose(conn core.ProtocolConnTracker) {
 }
 
-func (h *HttpTracker) RequestDecoder(stream *tcpreader.ReaderStream, conn tracker.ProtocolConnTracker) func() (interface{}, error) {
+func (h *Tracker) RequestDecoder(stream *tcpreader.ReaderStream, conn core.ProtocolConnTracker) func() (interface{}, error) {
 	buf := bufio.NewReader(stream)
 	return func() (interface{}, error) {
 		req, err := http.ReadRequest(buf)
-		(conn.(*HttpConnTracker)).LastReq = req
+		(conn.(*ConnTracker)).LastReq = req
 		return req, err
 	}
 }
 
-func (h *HttpTracker) ResponseDecoder(stream *tcpreader.ReaderStream, conn tracker.ProtocolConnTracker) func() (interface{}, error) {
+func (h *Tracker) ResponseDecoder(stream *tcpreader.ReaderStream, conn core.ProtocolConnTracker) func() (interface{}, error) {
 	buf := bufio.NewReader(stream)
 	return func() (val interface{}, err error) {
 		defer func() {
 			if err != nil {
 			}
 		}()
-		req := (conn.(*HttpConnTracker)).LastReq
-		conn.(*HttpConnTracker).LastResp, err = http.ReadResponse(buf, req)
-		return conn.(*HttpConnTracker).LastResp, err
+		req := (conn.(*ConnTracker)).LastReq
+		conn.(*ConnTracker).LastResp, err = http.ReadResponse(buf, req)
+		return conn.(*ConnTracker).LastResp, err
 	}
 }
 
-type HttpConnTracker struct {
-	Tracker  *HttpTracker
-	ConnMeta tracker.ConnMeta
+type ConnTracker struct {
+	Tracker  *Tracker
+	ConnMeta core.ConnMeta
 	LastReq  *http.Request
 	LastResp *http.Response
 
 	Record bool
 }
 
-func (h *HttpConnTracker) OnRequest(req interface{}) error {
+func (h *ConnTracker) OnRequest(req interface{}) error {
 	if req == nil {
 		return nil
 	}
@@ -82,7 +78,7 @@ func (h *HttpConnTracker) OnRequest(req interface{}) error {
 	return nil
 }
 
-func (h *HttpConnTracker) OnResponse(resp interface{}) error {
+func (h *ConnTracker) OnResponse(resp interface{}) error {
 	if resp == nil {
 		return nil
 	}
@@ -97,5 +93,5 @@ func (h *HttpConnTracker) OnResponse(resp interface{}) error {
 	return nil
 }
 
-func (h *HttpConnTracker) OnError(err error) {
+func (h *ConnTracker) OnError(err error) {
 }

@@ -7,7 +7,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/Salpadding/l7dump/tracker"
+	"sync"
+
+	"github.com/Salpadding/l7dump/core"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -16,16 +18,31 @@ import (
 )
 
 type ProtocolSessionMgr struct {
-	Trackers map[int]tracker.ProtocolTracker
+	Trackers map[int]core.ProtocolTracker
+	connPool map[int]*sync.Map
+}
+
+func NewMgr() ProtocolSessionMgr {
+	return ProtocolSessionMgr{
+		Trackers: make(map[int]core.ProtocolTracker),
+		connPool: make(map[int]*sync.Map),
+	}
+}
+
+func (p *ProtocolSessionMgr) AddTracker(port int, tracker core.ProtocolTracker) {
+	p.Trackers[port] = tracker
+	p.connPool[port] = &sync.Map{}
 }
 
 type protocolConnTrackerWrapper struct {
-	conn      tracker.ProtocolConnTracker
-	tracker   tracker.ProtocolTracker
+	conn      core.ProtocolConnTracker
+	tracker   core.ProtocolTracker
 	decoder   func() (interface{}, error)
 	handler   func(interface{}) error
 	errHandle func(error)
 	stream    tcpreader.ReaderStream
+	meta      core.ConnMeta
+	connPool  *sync.Map
 }
 
 func (s *protocolConnTrackerWrapper) run() {
@@ -33,6 +50,7 @@ func (s *protocolConnTrackerWrapper) run() {
 		payload, err := s.decoder()
 		if err == io.EOF {
 			s.tracker.OnClose(s.conn)
+			s.connPool.Delete(s.meta.String())
 			return
 		}
 		if err != nil {
@@ -43,15 +61,25 @@ func (s *protocolConnTrackerWrapper) run() {
 	}
 }
 
+func (s *ProtocolSessionMgr) getConnect(meta core.ConnMeta, tk core.ProtocolTracker) core.ProtocolConnTracker {
+	m := s.connPool[meta.ServerPort]
+	actual, _ := m.LoadOrStore(meta.String(), tk.NewConnect(meta))
+	return actual.(core.ProtocolConnTracker)
+}
+
+// newWrapper
+// connTracker 和 wrapper 是 1:2 的关系
 func (s *ProtocolSessionMgr) newWrapper(net, transport gopacket.Flow) protocolConnTrackerWrapper {
 	meta, isReq := s.connKey(net, transport)
 	tracker := s.Trackers[meta.ServerPort]
-	conn := tracker.GetConnect(meta)
+	conn := s.getConnect(meta, tracker)
 	wrapper := protocolConnTrackerWrapper{
 		tracker:   tracker,
 		conn:      conn,
 		errHandle: conn.OnError,
 		stream:    tcpreader.NewReaderStream(),
+		meta:      meta,
+		connPool:  s.connPool[meta.ServerPort],
 	}
 
 	if isReq {
@@ -64,7 +92,7 @@ func (s *ProtocolSessionMgr) newWrapper(net, transport gopacket.Flow) protocolCo
 	return wrapper
 }
 
-// New
+// New 只是实现接口
 func (s *ProtocolSessionMgr) New(net, transport gopacket.Flow) tcpassembly.Stream {
 	wrapper := s.newWrapper(net, transport)
 	go wrapper.run()
@@ -74,20 +102,20 @@ func (s *ProtocolSessionMgr) New(net, transport gopacket.Flow) tcpassembly.Strea
 // connKey 客户端的端口一定大于服务端的端口
 // pcap 里面客户端到服务端 服务端到客户端 会触发两次 ServerSessionMgr.New
 // 我们通过这个 key 判断是否是新的连接
-func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (tracker.ConnMeta, bool) {
+func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (core.ConnMeta, bool) {
 	ip1 := (net.IP)(netFlow.Src().Raw())
 	ip2 := (net.IP)(netFlow.Dst().Raw())
 	port1 := int(binary.BigEndian.Uint16(transportFlow.Src().Raw()))
 	port2 := int(binary.BigEndian.Uint16(transportFlow.Dst().Raw()))
 	if port1 > port2 {
-		return tracker.ConnMeta{
+		return core.ConnMeta{
 			ClientIP:   ip1,
 			ClientPort: port1,
 			ServerIP:   ip2,
 			ServerPort: port2,
 		}, true
 	}
-	return tracker.ConnMeta{
+	return core.ConnMeta{
 		ClientIP:   ip2,
 		ClientPort: port2,
 		ServerIP:   ip1,
