@@ -1,14 +1,13 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"strconv"
-	"strings"
 
-	httpTracker "github.com/Salpadding/l7dump/http"
+	"github.com/Salpadding/l7dump/http"
+	"github.com/Salpadding/l7dump/mysql"
 	"github.com/Salpadding/l7dump/session"
 )
 
@@ -16,31 +15,54 @@ import (
 // 打印所有 url 中包含 /kapis/resources.kubesphere.io/v1alpha2/componenthealth 的请求
 const matchUrl = "/kapis/resources.kubesphere.io/v1alpha2/components"
 
+type IfaceCfg struct {
+	Bpf      string          `json:"bpf"`
+	Trackers []TrackerConfig `json:"trackers"`
+}
+
+type TrackerConfig struct {
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"` // 协议 mysql, http
+	Program  string `json:"program"`  // lua 脚本 尚未支持
+}
+
 // l7dump en0 80 /order
 func main() {
-	if len(os.Args) < 4 {
-		panic("usage: l7dump [iface] [port] [path]")
-	}
-	mgr := session.NewMgr()
-
-	httpTracker := httpTracker.Tracker{
-		PreReq: func(r *http.Request) bool {
-			return strings.Contains(r.URL.String(), os.Args[3])
-		},
-		PostReq: func(req *http.Request, resp *http.Response) {
-			fmt.Printf("%s %s\n", req.Method, req.URL.String())
-			io.Copy(os.Stdout, req.Body)
-			fmt.Println()
-			io.Copy(os.Stdout, resp.Body)
-			fmt.Println()
-		},
+	if len(os.Args) != 2 {
+		panic("usage: l7dump [config.json]")
 	}
 
-	port, _ := strconv.Atoi(os.Args[2])
+	bg := context.Background()
+	var config map[string]IfaceCfg
+	jsonData, err := os.ReadFile(os.Args[1])
 
-	mgr.AddTracker(port, &httpTracker)
-	fmt.Printf("add http core at port %d", port)
-	if err := mgr.Listen(os.Args[1]); err != nil {
+	if err != nil {
 		panic(err)
 	}
+
+	if err = json.Unmarshal(jsonData, &config); err != nil {
+		panic(err)
+	}
+
+	// mgr 和 iface 1:1
+	for iface := range config {
+		mgr := session.NewMgr(bg)
+
+		cfg := config[iface]
+
+		for i := range cfg.Trackers {
+			switch cfg.Trackers[i].Protocol {
+			case "mysql":
+				mgr.AddTracker(cfg.Trackers[i].Port, &mysql.Tracker{})
+			case "http":
+				// TODO: 完善 http tracker
+				mgr.AddTracker(cfg.Trackers[i].Port, &http.Tracker{})
+			default:
+				panic(fmt.Sprintf("unknown protocol %s", cfg.Trackers[i].Protocol))
+			}
+		}
+		go mgr.Listen(cfg.Bpf, iface)
+	}
+
+	<-bg.Done()
 }

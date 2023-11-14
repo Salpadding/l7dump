@@ -2,12 +2,13 @@ package session
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
 	"time"
 
 	"sync"
+
+	"context"
 
 	"github.com/Salpadding/l7dump/core"
 	"github.com/google/gopacket"
@@ -20,12 +21,14 @@ import (
 type ProtocolSessionMgr struct {
 	Trackers map[int]core.ProtocolTracker
 	connPool map[int]*sync.Map
+	ctx      context.Context
 }
 
-func NewMgr() ProtocolSessionMgr {
+func NewMgr(ctx context.Context) ProtocolSessionMgr {
 	return ProtocolSessionMgr{
 		Trackers: make(map[int]core.ProtocolTracker),
 		connPool: make(map[int]*sync.Map),
+		ctx:      ctx,
 	}
 }
 
@@ -126,12 +129,7 @@ func (s *ProtocolSessionMgr) connKey(netFlow, transportFlow gopacket.Flow) (core
 
 // Listen
 // TODO: 复用 bpf 表达式
-func (s *ProtocolSessionMgr) Listen(iface string) error {
-	var port int
-	for p := range s.Trackers {
-		port = p
-	}
-
+func (s *ProtocolSessionMgr) Listen(bpf, iface string) error {
 	// 以太网 MTU 通常小于 1600
 	handle, err := pcap.OpenLive(iface, 1600, true, pcap.BlockForever)
 
@@ -141,7 +139,7 @@ func (s *ProtocolSessionMgr) Listen(iface string) error {
 
 	// TODO: 多端口复用同一个 bpffilter
 	// 只保留 ip.protocol = tcp 的 而且 tcp.port = serverPort 的 包
-	if err = handle.SetBPFFilter(fmt.Sprintf("tcp and port %d", port)); err != nil {
+	if err = handle.SetBPFFilter(bpf); err != nil {
 		panic(err)
 	}
 
@@ -165,6 +163,8 @@ func (s *ProtocolSessionMgr) Listen(iface string) error {
 
 			tcp := packet.TransportLayer().(*layers.TCP)
 			assembler.AssembleWithTimestamp(packet.NetworkLayer().NetworkFlow(), tcp, packet.Metadata().Timestamp)
+		case <-s.ctx.Done():
+			return nil
 		case <-ticker:
 			assembler.FlushOlderThan(time.Now().Add(time.Minute * -2))
 		}

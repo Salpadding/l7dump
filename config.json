@@ -1,0 +1,12 @@
+{
+    "en7": {
+        "bpf": "tcp and port 3307",
+        "trackers": [
+            {
+                "port": 3307,
+                "protocol": "mysql",
+                "program": ""
+            }
+        ]
+    }
+}
