@@ -3,9 +3,9 @@ package mysql
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
-	"sync"
 
 	"io"
 
@@ -17,12 +17,13 @@ var (
 	_ core.ProtocolTracker     = (*Tracker)(nil)
 	_ core.ProtocolConnTracker = (*ConnTracker)(nil)
 
-	_ ProtoPacket = (ServerHandShake)(nil)
+	_ ProtoPacket = (*ServerHandShake)(nil)
 )
 
 // ProtoPacket mysql 协议规定的包类型
 type ProtoPacket interface {
 	Type() string
+	parse() error
 }
 
 type RawPacket struct {
@@ -89,57 +90,74 @@ type ConnTracker struct {
 
 	reqPacket RawPacket
 
-	handshake ServerHandShake
-	conns     sync.Map
+	ServerHandshake *ServerHandShake
 
-	ServerMeta struct {
-		Protocol int
-		Version  string
-	}
-
-	ClientMeta struct {
-		HandshakeData []byte
-	}
+	ClientHandShake *ClientHandShake
 }
 
 // DecodeReq
 func (c *ConnTracker) DecodeReq() (val interface{}, err error) {
 	defer c.reqPacket.Close()
 	// 跳过握手阶段
-	if c.ClientMeta.HandshakeData == nil {
-		c.ClientMeta.HandshakeData, err = io.ReadAll(&c.reqPacket)
-		return c.ClientMeta.HandshakeData, err
+	if c.ClientHandShake == nil {
+		c.ClientHandShake = &ClientHandShake{
+			Parser: Parser{
+				Reader: &c.reqPacket,
+			},
+		}
+
+		err = c.ClientHandShake.parse()
+
+		if err != nil {
+			fmt.Printf("parse client handshake failed %v\n", err)
+		} else {
+			fmt.Printf("client user = %s\n", c.ClientHandShake.User)
+		}
+		return
 	}
 
 	var cmd [1]byte
 	c.reqPacket.Read(cmd[:])
 
-	// 跳过非 query 包
-	if cmd[0] != comQuery {
-		tcpreader.DiscardBytesToEOF(&c.reqPacket)
+	// query 纯文本
+	if cmd[0] == comQuery {
+		// 打印 sql 语句
+		io.Copy(os.Stdout, &c.reqPacket)
+		fmt.Println()
 		return nil, nil
 	}
 
-	// 打印 sql 语句
-	io.Copy(os.Stdout, &c.reqPacket)
-	fmt.Println()
+	// stmt
+	io.Copy(io.Discard, &c.reqPacket)
 	return nil, nil
 }
 
 func (c *ConnTracker) DecodeResp() (val interface{}, err error) {
-	if c.handshake == nil {
-		c.handshake, err = io.ReadAll(&c.respPacket)
-		if err != nil {
-			return
+	defer c.respPacket.Close()
+	if c.ServerHandshake == nil {
+		c.ServerHandshake = &ServerHandShake{
+			Parser: Parser{
+				Reader: &c.respPacket,
+			},
 		}
-		val = c.handshake
-		c.handshake.parse(&c.ServerMeta.Version)
-		fmt.Println(c.ServerMeta.Version)
-		c.respPacket.Close()
+		err = c.ServerHandshake.parse()
+		if err != nil {
+			fmt.Printf("parse server handshake failed %v\n", err)
+		} else {
+			js, _ := json.Marshal(c.ServerHandshake)
+			fmt.Printf("server = %s\n", string(js))
+		}
 		return
 	}
-	tcpreader.DiscardBytesToEOF(&c.respPacket)
-	c.respPacket.Close()
+
+	var cmd [1]byte
+	c.respPacket.Read(cmd[:])
+
+	if cmd[0] == iOK {
+
+	}
+
+	io.Copy(io.Discard, &c.reqPacket)
 	return nil, nil
 }
 
@@ -151,20 +169,26 @@ type Tracker struct {
 func (m *Tracker) RequestDecoder(stream *tcpreader.ReaderStream, conn core.ProtocolConnTracker) func() (interface{}, error) {
 	c := conn.(*ConnTracker)
 	c.reqPacket.conn = bufio.NewReader(stream)
-	c.reqPacket.reading = true
+
 	return c.DecodeReq
 }
 
 func (m *Tracker) ResponseDecoder(stream *tcpreader.ReaderStream, conn core.ProtocolConnTracker) func() (interface{}, error) {
 	c := conn.(*ConnTracker)
 	c.respPacket.conn = bufio.NewReader(stream)
-	c.respPacket.reading = true
 	return c.DecodeResp
 }
 
 func (m *Tracker) NewConnect(meta *core.ConnMeta) core.ProtocolConnTracker {
+	fmt.Printf("new mysql connect to %s\n", meta.String())
 	return &ConnTracker{
 		meta: meta,
+		reqPacket: RawPacket{
+			reading: true,
+		},
+		respPacket: RawPacket{
+			reading: true,
+		},
 	}
 }
 

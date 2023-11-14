@@ -23,16 +23,40 @@ const (
 	MinClientPort = 49152
 )
 
+type rwmap struct {
+	data map[string]core.ProtocolConnTracker
+	mtx  sync.RWMutex
+}
+
+func (r *rwmap) GetOrLoad(key string, compute func() core.ProtocolConnTracker) core.ProtocolConnTracker {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	ret, ok := r.data[key]
+	if ok {
+		return ret
+	}
+
+	r.data[key] = compute()
+	return r.data[key]
+}
+
+func (r *rwmap) Delete(key string) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	delete(r.data, key)
+}
+
 type ProtocolSessionMgr struct {
 	Trackers map[int]core.ProtocolTracker
-	connPool map[int]*sync.Map
+	connPool map[int]*rwmap
 	ctx      context.Context
 }
 
 func NewMgr(ctx context.Context) ProtocolSessionMgr {
 	return ProtocolSessionMgr{
 		Trackers: make(map[int]core.ProtocolTracker),
-		connPool: make(map[int]*sync.Map),
+		connPool: make(map[int]*rwmap),
 		ctx:      ctx,
 	}
 }
@@ -40,7 +64,9 @@ func NewMgr(ctx context.Context) ProtocolSessionMgr {
 func (p *ProtocolSessionMgr) AddTracker(port int, tracker core.ProtocolTracker) {
 	fmt.Printf("add tracker at port %d\n", port)
 	p.Trackers[port] = tracker
-	p.connPool[port] = &sync.Map{}
+	p.connPool[port] = &rwmap{
+		data: make(map[string]core.ProtocolConnTracker),
+	}
 }
 
 type protocolConnTrackerWrapper struct {
@@ -51,7 +77,7 @@ type protocolConnTrackerWrapper struct {
 	errHandle func(error)
 	stream    tcpreader.ReaderStream
 	meta      *core.ConnMeta
-	connPool  *sync.Map
+	connPool  *rwmap
 }
 
 func (s *protocolConnTrackerWrapper) run() {
@@ -88,8 +114,9 @@ func (s *ProtocolSessionMgr) getConnect(meta *core.ConnMeta, tk core.ProtocolTra
 	if !ok {
 		panic(fmt.Sprintf("port %d doesn't related to tracker", meta.ServerPort))
 	}
-	actual, _ := m.LoadOrStore(meta.String(), tk.NewConnect(meta))
-	return actual.(core.ProtocolConnTracker)
+	return m.GetOrLoad(meta.String(), func() core.ProtocolConnTracker {
+		return tk.NewConnect(meta)
+	})
 }
 
 // newWrapper
@@ -120,6 +147,7 @@ func (s *ProtocolSessionMgr) newWrapper(meta *core.ConnMeta, isReq bool, net, tr
 func (s *ProtocolSessionMgr) New(net, transport gopacket.Flow) tcpassembly.Stream {
 	meta, isReq := s.connKey(net, transport)
 	if meta.ClientPort < MinClientPort {
+		fmt.Printf("drop connection %s\n", meta.String())
 		return &nop
 	}
 	wrapper := s.newWrapper(&meta, isReq, net, transport)

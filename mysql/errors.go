@@ -1,7 +1,7 @@
 package mysql
 
-import(
-    "errors"
+import (
+	"errors"
 )
 
 // Various errors the driver might return. Can change between driver versions.
