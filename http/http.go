@@ -21,7 +21,7 @@ type Tracker struct {
 	PostReq func(req *http.Request, resp *http.Response)
 }
 
-func (h *Tracker) NewConnect(meta core.ConnMeta) core.ProtocolConnTracker {
+func (h *Tracker) NewConnect(meta *core.ConnMeta) core.ProtocolConnTracker {
 	return &ConnTracker{
 		ConnMeta: meta,
 		Tracker:  h,
@@ -55,7 +55,7 @@ func (h *Tracker) ResponseDecoder(stream *tcpreader.ReaderStream, conn core.Prot
 
 type ConnTracker struct {
 	Tracker  *Tracker
-	ConnMeta core.ConnMeta
+	ConnMeta *core.ConnMeta
 	LastReq  *http.Request
 	LastResp *http.Response
 

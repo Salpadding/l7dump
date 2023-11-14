@@ -84,7 +84,7 @@ func (packet *RawPacket) Read(p []byte) (n int, err error) {
 }
 
 type ConnTracker struct {
-	meta       core.ConnMeta
+	meta       *core.ConnMeta
 	respPacket RawPacket
 
 	reqPacket RawPacket
@@ -162,7 +162,7 @@ func (m *Tracker) ResponseDecoder(stream *tcpreader.ReaderStream, conn core.Prot
 	return c.DecodeResp
 }
 
-func (m *Tracker) NewConnect(meta core.ConnMeta) core.ProtocolConnTracker {
+func (m *Tracker) NewConnect(meta *core.ConnMeta) core.ProtocolConnTracker {
 	return &ConnTracker{
 		meta: meta,
 	}

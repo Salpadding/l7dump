@@ -27,7 +27,7 @@ type ProtocolTracker interface {
 	RequestDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error)
 	ResponseDecoder(stream *tcpreader.ReaderStream, conn ProtocolConnTracker) func() (interface{}, error)
 
-	NewConnect(ConnMeta) ProtocolConnTracker
+	NewConnect(*ConnMeta) ProtocolConnTracker
 
 	OnClose(ProtocolConnTracker)
 }

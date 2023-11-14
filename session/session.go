@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"time"
@@ -16,6 +17,10 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/tcpassembly"
 	"github.com/google/gopacket/tcpassembly/tcpreader"
+)
+
+const (
+	MinClientPort = 49152
 )
 
 type ProtocolSessionMgr struct {
@@ -33,6 +38,7 @@ func NewMgr(ctx context.Context) ProtocolSessionMgr {
 }
 
 func (p *ProtocolSessionMgr) AddTracker(port int, tracker core.ProtocolTracker) {
+	fmt.Printf("add tracker at port %d\n", port)
 	p.Trackers[port] = tracker
 	p.connPool[port] = &sync.Map{}
 }
@@ -44,7 +50,7 @@ type protocolConnTrackerWrapper struct {
 	handler   func(interface{}) error
 	errHandle func(error)
 	stream    tcpreader.ReaderStream
-	meta      core.ConnMeta
+	meta      *core.ConnMeta
 	connPool  *sync.Map
 }
 
@@ -64,16 +70,31 @@ func (s *protocolConnTrackerWrapper) run() {
 	}
 }
 
-func (s *ProtocolSessionMgr) getConnect(meta core.ConnMeta, tk core.ProtocolTracker) core.ProtocolConnTracker {
-	m := s.connPool[meta.ServerPort]
+type noop struct {
+}
+
+var nop noop
+
+func (s *noop) New(netFlow, tcpFlow gopacket.Flow) tcpassembly.Stream {
+	return s
+}
+func (s *noop) Reassembled([]tcpassembly.Reassembly) {
+}
+func (s *noop) ReassemblyComplete() {
+}
+
+func (s *ProtocolSessionMgr) getConnect(meta *core.ConnMeta, tk core.ProtocolTracker) core.ProtocolConnTracker {
+	m, ok := s.connPool[meta.ServerPort]
+	if !ok {
+		panic(fmt.Sprintf("port %d doesn't related to tracker", meta.ServerPort))
+	}
 	actual, _ := m.LoadOrStore(meta.String(), tk.NewConnect(meta))
 	return actual.(core.ProtocolConnTracker)
 }
 
 // newWrapper
 // connTracker 和 wrapper 是 1:2 的关系
-func (s *ProtocolSessionMgr) newWrapper(net, transport gopacket.Flow) protocolConnTrackerWrapper {
-	meta, isReq := s.connKey(net, transport)
+func (s *ProtocolSessionMgr) newWrapper(meta *core.ConnMeta, isReq bool, net, transport gopacket.Flow) protocolConnTrackerWrapper {
 	tracker := s.Trackers[meta.ServerPort]
 	conn := s.getConnect(meta, tracker)
 	wrapper := protocolConnTrackerWrapper{
@@ -97,7 +118,11 @@ func (s *ProtocolSessionMgr) newWrapper(net, transport gopacket.Flow) protocolCo
 
 // New 只是实现接口
 func (s *ProtocolSessionMgr) New(net, transport gopacket.Flow) tcpassembly.Stream {
-	wrapper := s.newWrapper(net, transport)
+	meta, isReq := s.connKey(net, transport)
+	if meta.ClientPort < MinClientPort {
+		return &nop
+	}
+	wrapper := s.newWrapper(&meta, isReq, net, transport)
 	go wrapper.run()
 	return &wrapper.stream
 }
@@ -139,6 +164,7 @@ func (s *ProtocolSessionMgr) Listen(bpf, iface string) error {
 
 	// TODO: 多端口复用同一个 bpffilter
 	// 只保留 ip.protocol = tcp 的 而且 tcp.port = serverPort 的 包
+	fmt.Printf("create listener at interface %s with filter %s\n", iface, bpf)
 	if err = handle.SetBPFFilter(bpf); err != nil {
 		panic(err)
 	}
