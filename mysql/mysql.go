@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"sync"
 
 	"io"
@@ -24,24 +25,18 @@ type ProtoPacket interface {
 	Type() string
 }
 
-type ServerHandShake []byte
-
-func (s ServerHandShake) Type() string {
-	return "ServerHandShake"
-}
-
 type RawPacket struct {
-	conn  io.Reader
-	size  int
-	hdr   [4]byte
-	seqId int
-	cont  bool
+	conn    io.Reader
+	size    int
+	hdr     [4]byte
+	seqId   int
+	reading bool // reading = true 表示还没有读取结束
 }
 
-// Reset 重置状态
-func (packet *RawPacket) Reset() {
+// Close 重置状态
+func (packet *RawPacket) Close() {
 	packet.size = 0
-	packet.cont = true
+	packet.reading = true
 }
 
 // Packets documentation:
@@ -49,11 +44,10 @@ func (packet *RawPacket) Reset() {
 // 3 + 1 + n
 func (packet *RawPacket) Read(p []byte) (n int, err error) {
 	if packet.size == 0 {
-		if !packet.cont {
+		if !packet.reading {
 			return 0, io.EOF
 		}
 
-		packet.cont = false
 		// 跳过头部
 		n, err = io.ReadAtLeast(packet.conn, packet.hdr[:], 4)
 		if err != nil {
@@ -70,7 +64,9 @@ func (packet *RawPacket) Read(p []byte) (n int, err error) {
 
 		// 表示还有剩余
 		if packet.size == 0xffffff {
-			packet.cont = true
+			packet.reading = true
+		} else {
+			packet.reading = false
 		}
 	}
 
@@ -100,39 +96,51 @@ type ConnTracker struct {
 		Protocol int
 		Version  string
 	}
+
+	ClientMeta struct {
+		HandshakeData []byte
+	}
 }
 
-func (c *ConnTracker) DecodeReq() (interface{}, error) {
-	tcpreader.DiscardBytesToEOF(c.reqPacket.conn)
+// DecodeReq
+func (c *ConnTracker) DecodeReq() (val interface{}, err error) {
+	defer c.reqPacket.Close()
+	// 跳过握手阶段
+	if c.ClientMeta.HandshakeData == nil {
+		c.ClientMeta.HandshakeData, err = io.ReadAll(&c.reqPacket)
+		return c.ClientMeta.HandshakeData, err
+	}
+
+	var cmd [1]byte
+	c.reqPacket.Read(cmd[:])
+
+	// 跳过非 query 包
+	if cmd[0] != comQuery {
+		tcpreader.DiscardBytesToEOF(&c.reqPacket)
+		return nil, nil
+	}
+
+	// 打印 sql 语句
+	io.Copy(os.Stdout, &c.reqPacket)
+	fmt.Println()
 	return nil, nil
 }
 
 func (c *ConnTracker) DecodeResp() (val interface{}, err error) {
-	c.respPacket.Reset()
 	if c.handshake == nil {
 		c.handshake, err = io.ReadAll(&c.respPacket)
 		if err != nil {
 			return
 		}
 		val = c.handshake
-		c.parseHandShake()
+		c.handshake.parse(&c.ServerMeta.Version)
 		fmt.Println(c.ServerMeta.Version)
+		c.respPacket.Close()
 		return
 	}
 	tcpreader.DiscardBytesToEOF(&c.respPacket)
+	c.respPacket.Close()
 	return nil, nil
-}
-
-// parseHandShake 解析服务端握手消息
-func (c *ConnTracker) parseHandShake() {
-	c.ServerMeta.Protocol = int(c.handshake[0])
-
-	pos := 1
-	for c.handshake[pos] != 0 {
-		pos++
-	}
-
-	c.ServerMeta.Version = string(c.handshake[1:pos])
 }
 
 // Tracker
@@ -143,12 +151,14 @@ type Tracker struct {
 func (m *Tracker) RequestDecoder(stream *tcpreader.ReaderStream, conn core.ProtocolConnTracker) func() (interface{}, error) {
 	c := conn.(*ConnTracker)
 	c.reqPacket.conn = bufio.NewReader(stream)
+	c.reqPacket.reading = true
 	return c.DecodeReq
 }
 
 func (m *Tracker) ResponseDecoder(stream *tcpreader.ReaderStream, conn core.ProtocolConnTracker) func() (interface{}, error) {
 	c := conn.(*ConnTracker)
 	c.respPacket.conn = bufio.NewReader(stream)
+	c.respPacket.reading = true
 	return c.DecodeResp
 }
 
